@@ -35,32 +35,135 @@ namespace FUMiniHotelSystem.DataAccess.Services
                 
                 var appSettingsPath = Path.Combine(solutionDir, "StudentNameWPF", "appsettings.json");
                 
-                if (File.Exists(appSettingsPath))
+                if (!File.Exists(appSettingsPath))
                 {
-                    var json = File.ReadAllText(appSettingsPath);
-                    var config = JsonSerializer.Deserialize<JsonElement>(json);
-                    
-                    if (config.TryGetProperty("ConnectionStrings", out var connectionStrings))
-                    {
-                        if (connectionStrings.TryGetProperty("DefaultConnection", out var defaultConnection))
-                        {
-                            return defaultConnection.GetString() ?? GetDefaultConnectionString();
-                        }
-                    }
+                    throw new FileNotFoundException(
+                        $"Configuration file not found at: {appSettingsPath}. Please ensure appsettings.json exists in the StudentNameWPF project.");
                 }
                 
-                return GetDefaultConnectionString();
+                var json = File.ReadAllText(appSettingsPath);
+                var config = JsonSerializer.Deserialize<JsonElement>(json);
+                
+                if (!config.TryGetProperty("ConnectionStrings", out var connectionStrings))
+                {
+                    throw new InvalidOperationException(
+                        "ConnectionStrings section not found in appsettings.json. Please add a ConnectionStrings section with DefaultConnection.");
+                }
+                
+                if (!connectionStrings.TryGetProperty("DefaultConnection", out var defaultConnection))
+                {
+                    throw new InvalidOperationException(
+                        "DefaultConnection not found in ConnectionStrings section. Please add DefaultConnection to ConnectionStrings.");
+                }
+                
+                var connectionString = defaultConnection.GetString();
+                if (string.IsNullOrWhiteSpace(connectionString))
+                {
+                    throw new InvalidOperationException(
+                        "DefaultConnection string is empty or null. Please provide a valid connection string.");
+                }
+                
+                // Replace placeholders in connection string
+                connectionString = ReplaceConnectionStringPlaceholders(connectionString, config);
+                
+                // Validate connection string format
+                ValidateConnectionString(connectionString);
+                
+                return connectionString;
             }
-            catch
+            catch (Exception ex) when (!(ex is FileNotFoundException || ex is InvalidOperationException))
             {
-                return GetDefaultConnectionString();
+                throw new InvalidOperationException(
+                    $"Failed to read configuration file: {ex.Message}. Please ensure appsettings.json is valid JSON and accessible.", ex);
             }
         }
 
         private string GetDefaultConnectionString()
         {
-            // Fallback connection strings
-            return "Server=(localdb)\\mssqllocaldb;Database=FUMiniHotelManagement;Trusted_Connection=true;MultipleActiveResultSets=true;";
+            // Throw exception instead of hardcoding connection string
+            throw new InvalidOperationException(
+                "Database connection string not found. Please ensure appsettings.json exists and contains a valid 'ConnectionStrings:DefaultConnection' setting.");
+        }
+
+        private string ReplaceConnectionStringPlaceholders(string connectionString, JsonElement config)
+        {
+            // Replace ${DatabaseName} placeholder with value from DatabaseSettings
+            if (connectionString.Contains("${DatabaseName}"))
+            {
+                if (config.TryGetProperty("DatabaseSettings", out var databaseSettings) &&
+                    databaseSettings.TryGetProperty("DatabaseName", out var databaseName))
+                {
+                    var dbName = databaseName.GetString();
+                    if (!string.IsNullOrWhiteSpace(dbName))
+                    {
+                        connectionString = connectionString.Replace("${DatabaseName}", dbName);
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException(
+                            "DatabaseName in DatabaseSettings is empty or null. Please provide a valid database name.");
+                    }
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        "DatabaseSettings.DatabaseName not found in configuration. Please add DatabaseSettings section with DatabaseName.");
+                }
+            }
+
+            return connectionString;
+        }
+
+        private void ValidateConnectionString(string connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                throw new ArgumentException("Connection string cannot be null or empty.");
+            }
+
+            // Check for required SQL Server connection string components
+            var requiredComponents = new[] { "Server", "Database" };
+            var missingComponents = new List<string>();
+
+            foreach (var component in requiredComponents)
+            {
+                if (!connectionString.Contains($"{component}=", StringComparison.OrdinalIgnoreCase))
+                {
+                    missingComponents.Add(component);
+                }
+            }
+
+            if (missingComponents.Any())
+            {
+                throw new ArgumentException(
+                    $"Connection string is missing required components: {string.Join(", ", missingComponents)}. " +
+                    "Please ensure your connection string includes Server and Database parameters.");
+            }
+
+            // Check for unresolved placeholders
+            if (connectionString.Contains("${"))
+            {
+                throw new InvalidOperationException(
+                    "Connection string contains unresolved placeholders. Please ensure all placeholders are properly configured.");
+            }
+
+            // Check for potentially problematic hardcoded values (only for production concerns)
+            var productionConcerns = new[]
+            {
+                "localhost",
+                "127.0.0.1"
+            };
+
+            var foundConcerns = productionConcerns.Where(pattern => 
+                connectionString.Contains(pattern, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (foundConcerns.Any())
+            {
+                // Log warning but don't throw exception - these might be intentional for development
+                System.Diagnostics.Debug.WriteLine(
+                    $"Info: Connection string contains development values: {string.Join(", ", foundConcerns)}. " +
+                    "Consider using environment variables for production deployments.");
+            }
         }
 
         public async Task<List<Customer>> LoadCustomersAsync()
